@@ -18,6 +18,7 @@ const twilioClient =
     ? twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN)
     : null;
 const twilioFrom = process.env.TWILIO_WHATSAPP_NUMBER; // e.g. "whatsapp:+16616057191"
+console.log(`[Interactive] twilioClient: ${!!twilioClient}, twilioFrom: ${twilioFrom}, ACCOUNT_SID set: ${!!process.env.TWILIO_ACCOUNT_SID}`);
 
 // Vercel doesn't auto-parse urlencoded bodies, so we need to do it manually
 function parseBody(req) {
@@ -36,10 +37,12 @@ function parseBody(req) {
 async function trySendViaRestApi(to, text) {
   if (!twilioClient || !twilioFrom) return false;
   try {
+    console.log("[Interactive] Attempting REST API send...");
     await sendReply(twilioClient, redis, twilioFrom, to, text);
+    console.log("[Interactive] Sent successfully via REST API");
     return true;
   } catch (err) {
-    console.error("REST API send failed, falling back to TwiML:", err.message);
+    console.error("[Interactive] REST API send failed, falling back to TwiML:", err.message, err.code, err.status);
     return false;
   }
 }
