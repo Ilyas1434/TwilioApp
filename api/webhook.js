@@ -7,8 +7,17 @@ const {
   buildMessages,
   deleteSession,
   extractStateFromMessages,
+  redis,
 } = require("../lib/conversation");
+const { sendReply } = require("../lib/twilio-interactive");
 const LUNA_SYSTEM_PROMPT = require("../lib/luna-prompt");
+
+// Twilio REST client for interactive messages (optional — falls back to TwiML if not configured)
+const twilioClient =
+  process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN
+    ? twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN)
+    : null;
+const twilioFrom = process.env.TWILIO_WHATSAPP_NUMBER; // e.g. "whatsapp:+16616057191"
 
 // Vercel doesn't auto-parse urlencoded bodies, so we need to do it manually
 function parseBody(req) {
@@ -18,6 +27,21 @@ function parseBody(req) {
     req.on("end", () => resolve(querystring.parse(data)));
     req.on("error", reject);
   });
+}
+
+/**
+ * Send a reply via REST API (with interactive buttons) or fall back to TwiML.
+ * Returns true if sent via REST API (caller should return empty TwiML).
+ */
+async function trySendViaRestApi(to, text) {
+  if (!twilioClient || !twilioFrom) return false;
+  try {
+    await sendReply(twilioClient, redis, twilioFrom, to, text);
+    return true;
+  } catch (err) {
+    console.error("REST API send failed, falling back to TwiML:", err.message);
+    return false;
+  }
 }
 
 module.exports = async function handler(req, res) {
@@ -36,13 +60,20 @@ module.exports = async function handler(req, res) {
     console.log(`OPENAI_API_KEY set: ${!!process.env.OPENAI_API_KEY}`);
 
     // Handle "forget me" requests — wipe session and respond immediately
-    const forgetPattern = /\b(forget\s+me|delete\s+my\s+data|erase\s+(my\s+)?data|wipe\s+(my\s+)?(data|everything))\b/i;
+    const forgetPattern =
+      /\b(forget\s+me|delete\s+my\s+data|erase\s+(my\s+)?data|wipe\s+(my\s+)?(data|everything))\b/i;
     if (forgetPattern.test(incomingMessage)) {
       await deleteSession(from);
+      const forgetReply =
+        "Done \u2014 all your data has been wiped. If you ever want to chat again, just send me a message and we\u2019ll start fresh. Take care! \ud83d\udc99";
+
+      const sentViaApi = await trySendViaRestApi(from, forgetReply);
+      if (sentViaApi) {
+        res.setHeader("Content-Type", "text/xml");
+        return res.status(200).send("<Response/>");
+      }
       const twiml = new twilio.twiml.MessagingResponse();
-      twiml.message(
-        "Done — all your data has been wiped. If you ever want to chat again, just send me a message and we'll start fresh. Take care! 💙"
-      );
+      twiml.message(forgetReply);
       res.setHeader("Content-Type", "text/xml");
       return res.status(200).send(twiml.toString());
     }
@@ -62,16 +93,33 @@ module.exports = async function handler(req, res) {
     const reply = completion.choices[0].message.content;
 
     // Extract state updates from the conversation (keyword matching, no extra AI calls)
-    const currentState = session?.state || { ageRange: null, mainReason: null, severity: null, branchesVisited: [], escalationIssued: false, stage: "entry" };
-    const stateUpdate = extractStateFromMessages(incomingMessage, reply, currentState);
+    const currentState = session?.state || {
+      ageRange: null,
+      mainReason: null,
+      severity: null,
+      branchesVisited: [],
+      escalationIssued: false,
+      stage: "entry",
+    };
+    const stateUpdate = extractStateFromMessages(
+      incomingMessage,
+      reply,
+      currentState
+    );
 
     // Persist conversation + state updates for next turn
     await appendMessage(from, "user", incomingMessage);
     await appendMessage(from, "assistant", reply, stateUpdate);
 
+    // Try sending via REST API (interactive buttons) — fall back to TwiML
+    const sentViaApi = await trySendViaRestApi(from, reply);
+    if (sentViaApi) {
+      res.setHeader("Content-Type", "text/xml");
+      return res.status(200).send("<Response/>");
+    }
+
     const twiml = new twilio.twiml.MessagingResponse();
     twiml.message(reply);
-
     res.setHeader("Content-Type", "text/xml");
     return res.status(200).send(twiml.toString());
   } catch (error) {
