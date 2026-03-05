@@ -7,18 +7,8 @@ const {
   buildMessages,
   deleteSession,
   extractStateFromMessages,
-  redis,
 } = require("../lib/conversation");
-const { sendReply } = require("../lib/twilio-interactive");
 const LUNA_SYSTEM_PROMPT = require("../lib/luna-prompt");
-
-// Twilio REST client for interactive messages (optional — falls back to TwiML if not configured)
-const twilioClient =
-  process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN
-    ? twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN)
-    : null;
-const twilioFrom = process.env.TWILIO_WHATSAPP_NUMBER; // e.g. "whatsapp:+16616057191"
-console.log(`[Interactive] twilioClient: ${!!twilioClient}, twilioFrom: ${twilioFrom}, ACCOUNT_SID set: ${!!process.env.TWILIO_ACCOUNT_SID}`);
 
 // Vercel doesn't auto-parse urlencoded bodies, so we need to do it manually
 function parseBody(req) {
@@ -28,23 +18,6 @@ function parseBody(req) {
     req.on("end", () => resolve(querystring.parse(data)));
     req.on("error", reject);
   });
-}
-
-/**
- * Send a reply via REST API (with interactive buttons) or fall back to TwiML.
- * Returns true if sent via REST API (caller should return empty TwiML).
- */
-async function trySendViaRestApi(to, text) {
-  if (!twilioClient || !twilioFrom) return false;
-  try {
-    console.log("[Interactive] Attempting REST API send...");
-    await sendReply(twilioClient, redis, twilioFrom, to, text);
-    console.log("[Interactive] Sent successfully via REST API");
-    return true;
-  } catch (err) {
-    console.error("[Interactive] REST API send failed, falling back to TwiML:", err.message, err.code, err.status);
-    return false;
-  }
 }
 
 module.exports = async function handler(req, res) {
@@ -67,16 +40,10 @@ module.exports = async function handler(req, res) {
       /\b(forget\s+me|delete\s+my\s+data|erase\s+(my\s+)?data|wipe\s+(my\s+)?(data|everything))\b/i;
     if (forgetPattern.test(incomingMessage)) {
       await deleteSession(from);
-      const forgetReply =
-        "Done \u2014 all your data has been wiped. If you ever want to chat again, just send me a message and we\u2019ll start fresh. Take care! \ud83d\udc99";
-
-      const sentViaApi = await trySendViaRestApi(from, forgetReply);
-      if (sentViaApi) {
-        res.setHeader("Content-Type", "text/xml");
-        return res.status(200).send("<Response/>");
-      }
       const twiml = new twilio.twiml.MessagingResponse();
-      twiml.message(forgetReply);
+      twiml.message(
+        "Done \u2014 all your data has been wiped. If you ever want to chat again, just send me a message and we\u2019ll start fresh. Take care! \ud83d\udc99"
+      );
       res.setHeader("Content-Type", "text/xml");
       return res.status(200).send(twiml.toString());
     }
@@ -113,13 +80,6 @@ module.exports = async function handler(req, res) {
     // Persist conversation + state updates for next turn
     await appendMessage(from, "user", incomingMessage);
     await appendMessage(from, "assistant", reply, stateUpdate);
-
-    // Try sending via REST API (interactive buttons) — fall back to TwiML
-    const sentViaApi = await trySendViaRestApi(from, reply);
-    if (sentViaApi) {
-      res.setHeader("Content-Type", "text/xml");
-      return res.status(200).send("<Response/>");
-    }
 
     const twiml = new twilio.twiml.MessagingResponse();
     twiml.message(reply);
