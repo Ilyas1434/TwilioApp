@@ -5,6 +5,8 @@ const {
   getSession,
   appendMessage,
   buildMessages,
+  deleteSession,
+  extractStateFromMessages,
 } = require("../lib/conversation");
 const LUNA_SYSTEM_PROMPT = require("../lib/luna-prompt");
 
@@ -33,6 +35,18 @@ module.exports = async function handler(req, res) {
     console.log(`Message from ${from}: ${incomingMessage}`);
     console.log(`OPENAI_API_KEY set: ${!!process.env.OPENAI_API_KEY}`);
 
+    // Handle "forget me" requests — wipe session and respond immediately
+    const forgetPattern = /\b(forget\s+me|delete\s+my\s+data|erase\s+(my\s+)?data|wipe\s+(my\s+)?(data|everything))\b/i;
+    if (forgetPattern.test(incomingMessage)) {
+      await deleteSession(from);
+      const twiml = new twilio.twiml.MessagingResponse();
+      twiml.message(
+        "Done — all your data has been wiped. If you ever want to chat again, just send me a message and we'll start fresh. Take care! 💙"
+      );
+      res.setHeader("Content-Type", "text/xml");
+      return res.status(200).send(twiml.toString());
+    }
+
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
     // Load conversation history for this user (keyed by phone number)
@@ -47,9 +61,13 @@ module.exports = async function handler(req, res) {
 
     const reply = completion.choices[0].message.content;
 
-    // Persist conversation for next turn
+    // Extract state updates from the conversation (keyword matching, no extra AI calls)
+    const currentState = session?.state || { ageRange: null, mainReason: null, severity: null, branchesVisited: [], escalationIssued: false, stage: "entry" };
+    const stateUpdate = extractStateFromMessages(incomingMessage, reply, currentState);
+
+    // Persist conversation + state updates for next turn
     await appendMessage(from, "user", incomingMessage);
-    await appendMessage(from, "assistant", reply);
+    await appendMessage(from, "assistant", reply, stateUpdate);
 
     const twiml = new twilio.twiml.MessagingResponse();
     twiml.message(reply);
